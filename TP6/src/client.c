@@ -5,153 +5,182 @@
  *
  */
 
-#include <string.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
+#include <string.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-#include "client.h"
 #include "bmp.h"
+#include "client.h"
 
-/*
- * Fonction d'envoi et de réception de messages
- * Il faut un argument : l'identifiant de la socket
- */
+static void ajouter_couleur(char *buffer, size_t buffer_size, const char *hex_color)
+{
+    size_t longueur = strlen(buffer);
+    size_t restant = buffer_size - longueur;
+
+    if (restant > 1)
+    {
+        if (longueur > 1 && buffer[longueur - 1] != '[')
+        {
+            strncat(buffer, ",", restant);
+            longueur = strlen(buffer);
+            restant = buffer_size - longueur;
+        }
+
+        strncat(buffer, "\"", restant);
+        strncat(buffer, hex_color, buffer_size - strlen(buffer) - 1);
+        strncat(buffer, "\"", buffer_size - strlen(buffer) - 1);
+    }
+}
+
+static void construire_json_couleurs(const char *pathname, int nombre_couleurs, char *buffer, size_t buffer_size)
+{
+    couleur_compteur *cc = analyse_bmp_image((char *)pathname);
+    int limite = 0;
+    int i = 0;
+
+    if (buffer == NULL || buffer_size == 0)
+    {
+        return;
+    }
+
+    buffer[0] = '\0';
+
+    if (cc == NULL || cc->size <= 0)
+    {
+        snprintf(buffer, buffer_size, "{\"code\":\"couleurs\",\"nombre\":0,\"valeurs\":[]}");
+        return;
+    }
+
+    if (nombre_couleurs <= 0 || nombre_couleurs > cc->size)
+    {
+        limite = cc->size;
+    }
+    else
+    {
+        limite = nombre_couleurs;
+    }
+
+    snprintf(buffer, buffer_size, "{\"code\":\"couleurs\",\"nombre\":%d,\"valeurs\":[", limite);
+
+    for (i = 0; i < limite; i++)
+    {
+        char couleur_hex[8];
+        if (cc->compte_bit == BITS24)
+        {
+            snprintf(couleur_hex, sizeof(couleur_hex), "#%02x%02x%02x",
+                     cc->cc.cc24[cc->size - 1 - i].c.rouge,
+                     cc->cc.cc24[cc->size - 1 - i].c.vert,
+                     cc->cc.cc24[cc->size - 1 - i].c.bleu);
+        }
+        else
+        {
+            snprintf(couleur_hex, sizeof(couleur_hex), "#%02x%02x%02x",
+                     cc->cc.cc32[cc->size - 1 - i].c.rouge,
+                     cc->cc.cc32[cc->size - 1 - i].c.vert,
+                     cc->cc.cc32[cc->size - 1 - i].c.bleu);
+        }
+        ajouter_couleur(buffer, buffer_size, couleur_hex);
+    }
+
+    strncat(buffer, "]}", buffer_size - strlen(buffer) - 1);
+}
 
 int envoie_recois_message(int socketfd)
 {
+    char data[1024];
+    char message[1024];
 
-  char data[1024];
-  // la réinitialisation de l'ensemble des données
-  memset(data, 0, sizeof(data));
+    memset(data, 0, sizeof(data));
+    memset(message, 0, sizeof(message));
 
-  // Demandez à l'utilisateur d'entrer un message
-  char message[1024];
-  printf("Votre message (max 1000 caracteres): ");
-  fgets(message, sizeof(message), stdin);
-  strcpy(data, "message: ");
-  strcat(data, message);
+    printf("Votre message (max 1000 caracteres): ");
+    if (fgets(message, sizeof(message), stdin) == NULL)
+    {
+        return -1;
+    }
 
-  int write_status = write(socketfd, data, strlen(data));
-  if (write_status < 0)
-  {
-    perror("erreur ecriture");
-    exit(EXIT_FAILURE);
-  }
+    message[strcspn(message, "\n")] = '\0';
+    strncpy(data, "message: ", sizeof(data) - 1);
+    data[sizeof(data) - 1] = '\0';
+    strncat(data, message, sizeof(data) - strlen(data) - 1);
 
-  // la réinitialisation de l'ensemble des données
-  memset(data, 0, sizeof(data));
+    if (write(socketfd, data, strlen(data)) < 0)
+    {
+        perror("erreur ecriture");
+        return -1;
+    }
 
-  // lire les données de la socket
-  int read_status = read(socketfd, data, sizeof(data));
-  if (read_status < 0)
-  {
-    perror("erreur lecture");
-    return -1;
-  }
+    memset(data, 0, sizeof(data));
+    if (read(socketfd, data, sizeof(data)) < 0)
+    {
+        perror("erreur lecture");
+        return -1;
+    }
 
-  printf("Message recu: %s\n", data);
-
-  return 0;
+    printf("Message recu: %s\n", data);
+    return 0;
 }
 
-void analyse(char *pathname, char *data)
+int envoie_couleurs(int socketfd, const char *pathname, int nombre_couleurs)
 {
-  // compte de couleurs
-  couleur_compteur *cc = analyse_bmp_image(pathname);
+    char data[4096];
+    memset(data, 0, sizeof(data));
 
-  int count;
-  strcpy(data, "couleurs: ");
-  char temp_string[10] = "10,";
-  if (cc->size < 10)
-  {
-    sprintf(temp_string, "%d,", cc->size);
-  }
-  strcat(data, temp_string);
+    construire_json_couleurs(pathname, nombre_couleurs, data, sizeof(data));
 
-  // choisir 10 couleurs
-  for (count = 1; count < 11 && cc->size - count > 0; count++)
-  {
-    if (cc->compte_bit == BITS32)
+    if (write(socketfd, data, strlen(data)) < 0)
     {
-      sprintf(temp_string, "#%02x%02x%02x,", cc->cc.cc24[cc->size - count].c.rouge, cc->cc.cc32[cc->size - count].c.vert, cc->cc.cc32[cc->size - count].c.bleu);
+        perror("erreur ecriture");
+        return -1;
     }
-    if (cc->compte_bit == BITS24)
-    {
-      sprintf(temp_string, "#%02x%02x%02x,", cc->cc.cc32[cc->size - count].c.rouge, cc->cc.cc32[cc->size - count].c.vert, cc->cc.cc32[cc->size - count].c.bleu);
-    }
-    strcat(data, temp_string);
-  }
 
-  // enlever le dernier virgule
-  data[strlen(data) - 1] = '\0';
-}
-
-int envoie_couleurs(int socketfd, char *pathname)
-{
-  char data[1024];
-  memset(data, 0, sizeof(data));
-  analyse(pathname, data);
-
-  int write_status = write(socketfd, data, strlen(data));
-  if (write_status < 0)
-  {
-    perror("erreur ecriture");
-    exit(EXIT_FAILURE);
-  }
-
-  return 0;
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-  int socketfd;
+    int socketfd;
+    struct sockaddr_in server_addr;
+    int nombre_couleurs = 10;
 
-  struct sockaddr_in server_addr;
+    if (argc < 2)
+    {
+        printf("usage: ./client chemin_bmp_image [nombre_couleurs]\n");
+        return EXIT_FAILURE;
+    }
 
-  if (argc < 2)
-  {
-    printf("usage: ./client chemin_bmp_image\n");
-    return (EXIT_FAILURE);
-  }
+    if (argc >= 3)
+    {
+        nombre_couleurs = atoi(argv[2]);
+        if (nombre_couleurs <= 0)
+        {
+            nombre_couleurs = 10;
+        }
+    }
 
-  /*
-   * Creation d'une socket
-   */
-  socketfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (socketfd < 0)
-  {
-    perror("socket");
-    exit(EXIT_FAILURE);
-  }
+    socketfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketfd < 0)
+    {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
 
-  // détails du serveur (adresse et port)
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(PORT);
-  server_addr.sin_addr.s_addr = INADDR_ANY;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
 
-  // demande de connection au serveur
-  int connect_status = connect(socketfd, (struct sockaddr *)&server_addr, sizeof(server_addr));
-  if (connect_status < 0)
-  {
-    perror("connection serveur");
-    exit(EXIT_FAILURE);
-  }
-  if (argc != 2)
-  {
-    // envoyer et recevoir un message
-    envoie_recois_message(socketfd);
-  }
-  else
-  {
-    // envoyer et recevoir les couleurs prédominantes
-    // d'une image au format BMP (argv[1])
-    envoie_couleurs(socketfd, argv[1]);
-  }
+    if (connect(socketfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    {
+        perror("connection serveur");
+        exit(EXIT_FAILURE);
+    }
 
-  close(socketfd);
+    envoie_couleurs(socketfd, argv[1], nombre_couleurs);
+    close(socketfd);
+    return 0;
 }
